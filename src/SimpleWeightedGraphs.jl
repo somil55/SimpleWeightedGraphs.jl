@@ -1,3 +1,4 @@
+__precompile__(true)
 module SimpleWeightedGraphs
 
 using LightGraphs
@@ -15,22 +16,20 @@ import LightGraphs:
 
     add_vertices!, adjacency_matrix, weights
 
+import LightGraphs.SimpleGraphs:
+    AbstractSimpleEdge, SimpleEdge, fadj, eltype, src, dst, show,
+    Pair, Tuple, reverse
+
 export
-    AbstractSimpleWeightedGraph,
-    AbstractSimpleWeightedEdge,
-    SimpleWeightedEdge,
+
     SimpleWeightedGraph,
-    SimpleWeightedGraphEdge,
-    SimpleWeightedDiGraph,
-    SimpleWeightedDiGraphEdge,
+    # SimpleWeightedDiGraph,
     weight,
     weighttype,
-    Graph,
-    DiGraph,
-    WGraph,
-    WDiGraph
-
-include("simpleweightededge.jl")
+    Graph
+    # DiGraph,
+    # WGraph,
+    # WDiGraph
 
 """
     AbstractSimpleWeightedGraph
@@ -54,98 +53,160 @@ function show(io::IO, g::AbstractSimpleWeightedGraph)
     end
 end
 
-# conversion to SparseMatrixCSC
-convert(::Type{SparseMatrixCSC{T, U}}, g::AbstractSimpleWeightedGraph) where T<:Real where U<:Integer = SparseMatrixCSC{T, U}(g.weights)
-
-
-
-
 
 ### INTERFACE
-
-nv(g::AbstractSimpleWeightedGraph) = eltype(g)(size(g.weights, 1))
+nv(g::AbstractSimpleWeightedGraph) = eltype(g)(length(fadj(g)))
 vertices(g::AbstractSimpleWeightedGraph) = one(eltype(g)):nv(g)
-eltype(x::AbstractSimpleWeightedGraph) = eltype(rowvals(x.weights))
-weighttype(x::AbstractSimpleWeightedGraph) = eltype(x.weights)
+weighttype(g::AbstractSimpleWeightedGraph) = eltype(g.weight__.vals)
+fadj(g::AbstractSimpleWeightedGraph) = g.fadjlist
+fadj(g::AbstractSimpleWeightedGraph, v::Integer) = g.fadjlist[v]
 
-has_edge(g::AbstractSimpleWeightedGraph, e::AbstractSimpleWeightedEdge) =
-    g.weights[dst(e), src(e)] != zero(weighttype(g))
 
 # handles single-argument edge constructors such as pairs and tuples
-has_edge(g::AbstractSimpleWeightedGraph, x) = has_edge(g, edgetype(g)(x))
-add_edge!(g::AbstractSimpleWeightedGraph, x) = add_edge!(g, edgetype(g)(x))
+has_edge(g::AbstractSimpleWeightedGraph, x::Union{Pair,Tuple}) = has_edge(g, edgetype(g)(x))
+has_edge(g::AbstractSimpleWeightedGraph, x::Union{Pair,Tuple}, y::Real) = has_edge(g, edgetype(g)(x), y;check_weight=true)
+add_edge!(g::AbstractSimpleWeightedGraph, x::Union{Pair,Tuple}) = add_edge!(g, edgetype(g)(x))
+add_edge!(g::AbstractSimpleWeightedGraph, x::Union{Pair,Tuple}, y::Real) = add_edge!(g, edgetype(g)(x), y)
 
 # handles two-argument edge constructors like src,dst
-has_edge(g::AbstractSimpleWeightedGraph, x, y) = has_edge(g, edgetype(g)(x, y, 0))
-add_edge!(g::AbstractSimpleWeightedGraph, x, y) = add_edge!(g, edgetype(g)(x, y, 1))
-add_edge!(g::AbstractSimpleWeightedGraph, x, y, z) = add_edge!(g, edgetype(g)(x, y, z))
+has_edge(g::AbstractSimpleWeightedGraph, x::Integer, y::Integer) = has_edge(g, edgetype(g)(x, y))
+has_edge(g::AbstractSimpleWeightedGraph, x::Integer, y::Integer, z::Real) = has_edge(g, edgetype(g)(x, y), z;check_weight=true)
+add_edge!(g::AbstractSimpleWeightedGraph, x::Integer, y::Integer) = add_edge!(g, edgetype(g)(x, y))
+add_edge!(g::AbstractSimpleWeightedGraph, x::Integer, y::Integer, z::Real) = add_edge!(g, edgetype(g)(x, y), z)
 
-function issubset(g::T, h::T) where T<:AbstractSimpleWeightedGraph
-    (gmin, gmax) = extrema(vertices(g))
-    (hmin, hmax) = extrema(vertices(h))
-    return (hmin <= gmin <= gmax <= hmax) && issubset(edges(g), edges(h))
-end
+
+in_neighbors(g::AbstractSimpleWeightedGraph, v::Integer) = badj(g,v)
+out_neighbors(g::AbstractSimpleWeightedGraph, v::Integer) = fadj(g,v)
 
 has_vertex(g::AbstractSimpleWeightedGraph, v::Integer) = v in vertices(g)
 
 function rem_edge!(g::AbstractSimpleWeightedGraph, u::Integer, v::Integer)
-    warn("Note: removing edges from this graph type is not performant.", once=true)
     T = eltype(g)
-    U = weighttype(g)
-    rem_edge!(g, edgetype(g)(T(u), T(v), one(U)))
+    rem_edge!(g, edgetype(g)(T(u), T(v)))
 end
 
 @doc_str """
-    rem_vertex!(g::AbstractSimpleWeightedGraph, v)
+    rem_vertex!(g, v)
 
 Remove the vertex `v` from graph `g`. Return false if removal fails
 (e.g., if vertex is not in the graph); true otherwise.
 
+### Performance
+Time complexity is ``\\mathcal{O}(k^2)``, where ``k`` is the max of the degrees
+of vertex ``v`` and vertex ``|V|``.
+
 ### Implementation Notes
 This operation has to be performed carefully if one keeps external
 data structures indexed by edges or vertices in the graph, since
-internally the removal results in all vertices with indices greater than `v`
-being shifted down one.
+internally the removal is performed swapping the vertices `v`  and ``|V|``,
+and removing the last vertex ``|V|`` from the graph. After removal the
+vertices in `g` will be indexed by ``1:|V|-1``.
 """
 function rem_vertex!(g::AbstractSimpleWeightedGraph, v::Integer)
-    warn("Note: removing vertices from this graph type is not performant.", once=true)
     v in vertices(g) || return false
     n = nv(g)
 
-    newweights = g.weights[1:nv(g) .!= v, :]
-    newweights = newweights[:, 1:nv(g) .!= v]
+    # remove the in_edges from v
+    srcs = copy(in_neighbors(g, v))
+    for s in srcs
+        rem_edge!(g, edgetype(g)(s, v))
+    end
+    # remove the in_edges from the last vertex
+    neigs = copy(in_neighbors(g, n))
+    for s in neigs
+        rem_edge!(g, edgetype(g)(s, n))
+    end
+    if v != n
+        # add the edges from n back to v
+        for s in neigs
+            add_edge!(g, edgetype(g)(s, v))
+        end
+    end
 
-    g.weights = newweights
+    if is_directed(g)
+        # remove the out_edges from v
+        dsts = copy(out_neighbors(g, v))
+        for d in dsts
+            rem_edge!(g, edgetype(g)(v, d))
+        end
+        # remove the out_edges from the last vertex
+        neigs = copy(out_neighbors(g, n))
+        for d in neigs
+            rem_edge!(g, edgetype(g)(n, d))
+        end
+        if v != n
+            # add the out_edges back to v
+            for d in neigs
+                add_edge!(g, edgetype(g)(v, d))
+            end
+        end
+    end
+
+    pop!(g.fadjlist)
+    if is_directed(g)
+        pop!(g.badjlist)
+    end
     return true
 end
 
-function out_neighbors(g::AbstractSimpleWeightedGraph)
-    mat = g.weights
-    return [mat.rowval[mat.colptr[i]:mat.colptr[i+1]-1] for i in 1:nv(g)]
-end
 
-function out_neighbors(g::AbstractSimpleWeightedGraph, v::Integer)
-    mat = g.weights
-    return mat.rowval[mat.colptr[v]:mat.colptr[v+1]-1]
-end
+# function issubset(g::T, h::T) where T<:AbstractSimpleWeightedGraph
+#     (gmin, gmax) = extrema(vertices(g))
+#     (hmin, hmax) = extrema(vertices(h))
+#     return (hmin <= gmin <= gmax <= hmax) && issubset(edges(g), edges(h))
+# end
 
-zero(g::T) where T<:AbstractSimpleWeightedGraph = T()
+# @doc_str """
+#     rem_vertex!(g::AbstractSimpleWeightedGraph, v)
+#
+# Remove the vertex `v` from graph `g`. Return false if removal fails
+# (e.g., if vertex is not in the graph); true otherwise.
+#
+# ### Implementation Notes
+# This operation has to be performed carefully if one keeps external
+# data structures indexed by edges or vertices in the graph, since
+# internally the removal results in all vertices with indices greater than `v`
+# being shifted down one.
+# """
+# function rem_vertex!(g::AbstractSimpleWeightedGraph, v::Integer)
+#     warn("Note: removing vertices from this graph type is not performant.", once=true)
+#     v in vertices(g) || return false
+#     n = nv(g)
+#
+#     newweights = g.weights[1:nv(g) .!= v, :]
+#     newweights = newweights[:, 1:nv(g) .!= v]
+#
+#     g.weights = newweights
+#     return true
+# end
 
-# TODO: manipulte SparseMatrixCSC directly
-add_vertex!(g::AbstractSimpleWeightedGraph) = add_vertices!(g, 1)
+# function out_neighbors(g::AbstractSimpleWeightedGraph)
+#     mat = g.weights
+#     return [mat.rowval[mat.colptr[i]:mat.colptr[i+1]-1] for i in 1:nv(g)]
+# end
+#
+# function out_neighbors(g::AbstractSimpleWeightedGraph, v::Integer)
+#     mat = g.weights
+#     return mat.rowval[mat.colptr[v]:mat.colptr[v+1]-1]
+# end
+#
+# zero(g::T) where T<:AbstractSimpleWeightedGraph = T()
+#
+# # TODO: manipulte SparseMatrixCSC directly
+# add_vertex!(g::AbstractSimpleWeightedGraph) = add_vertices!(g, 1)
+#
+# copy(g::T) where T <: AbstractSimpleWeightedGraph =  T(copy(g.weights))
 
-copy(g::T) where T <: AbstractSimpleWeightedGraph =  T(copy(g.weights))
 
-
-const SimpleWeightedGraphEdge = SimpleWeightedEdge
-const SimpleWeightedDiGraphEdge = SimpleWeightedEdge
-include("simpleweighteddigraph.jl")
+# const SimpleWeightedGraphEdge = SimpleWeightedEdge
+# const SimpleWeightedDiGraphEdge = SimpleWeightedEdge
+# include("simpleweighteddigraph.jl")
 include("simpleweightedgraph.jl")
-include("overrides.jl")
+# include("overrides.jl")
 
 
-const Graph = SimpleWeightedGraph
-const WGraph = SimpleWeightedGraph
-const WDiGraph = SimpleWeightedDiGraph
+# const Graph = SimpleWeightedGraph
+# const WGraph = SimpleWeightedGraph
+# const WDiGraph = SimpleWeightedDiGraph
 
 end # module
